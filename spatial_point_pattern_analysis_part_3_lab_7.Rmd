@@ -1,0 +1,166 @@
+---
+title: 'Lab 7 Part 3: Spatial point pattern analysis'
+author: "Julianna Renzi"
+date: "2/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(sf)
+library(here)
+library(sp) # proj4string
+library(spatstat) # as "owin" etc.
+library(maptools) # for converting to ppp, etc.
+library(tmap)
+library(raster)
+```
+
+Read in the data
+
+```{r}
+voles <- read_sf(dsn = here("redtreevoledata"), # dsn = data source name (interpretation varies by driver - for some drivers, dsn is a file name, but may also be a folder, or contain the name and access credentials of a database)
+                 layer = "ds033") %>% # layer name (varies by driver, may be a file name without extension); in case layer is missing, st_read will read the first layer of dsn
+  dplyr::select(COUNTY) %>% 
+  filter(COUNTY == "HUM") %>% 
+  st_transform(crs = 4326) # can see it was NAD83, but this changes it to WGS 84
+
+# plot it to explore
+plot(voles)
+```
+
+```{r}
+# now get Humbold County outline
+humbolt <- read_sf(dsn = here("redtreevoledata"),
+                   layer = "california_county_shape_file") %>% 
+  filter(NAME == "Humboldt") %>% 
+  dplyr::select(NAME)
+
+# can check to see that it doesn't have a CRS
+st_crs(humbolt)
+
+# set CRS
+st_crs(humbolt) <- 4326
+
+# plot them together
+ggplot() +
+  geom_sf(data = humbolt,
+          color = "darkorchid",
+          fill = "darkorchid4",
+          size = 1) +
+  geom_sf(data = voles,
+          color = "orange",
+          alpha = 0.7,
+          size = 2) +
+  theme_minimal()
+```
+
+These need to be combined into spatial point pattern data (points + window combo) and for point pattern analysis this requires a *2D protection (in this case, UTM)*, which is why there's this `proj4string` line to specify the project. This part uses functions in `spatstat` to create point patterns that play nicely with other functions for data viz & point pattern analysis.
+
+```{r}
+# convert to object 'Spatial'
+voles_sp <- as(voles, "Spatial")
+
+proj4string(voles_sp) <- "+proj=utm +zone=10 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0" # Add UTM projection
+```
+
+```{r}
+# convert to spatial point pattern
+voles_ppp <- as(voles_sp, "ppp")
+
+# Convert to object 'Spatial'
+humbolt_sp <- as(humbolt, "Spatial")
+# add UTM projection
+proj4string(humbolt_sp) <- "+proj=utm +zone=10 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0" # Add UTM projection
+```
+
+```{r}
+# convert to spatial point pattern
+humbolt_win <- as(humbolt_sp, "owin") # owin = observation window
+
+# combine as a point pattern object (points + window)
+voles_full <- ppp(voles_ppp$x, voles_ppp$y, window = humbolt_win)
+# ppp() "creates an object of class "ppp" representing a point pattern dataset in the two-dimensional plan"-- window must be a window of observation as an object of class "owin"
+
+plot(voles_full) # Illegal point (outside window) shows up as the plus sign
+```
+
+## Now make a kernel density plot
+
+Run to see vole "hotspots" by kernel density, then see what happens when you change sigma
+
+```{r}
+voles_density <- density(voles_full, sigma = 0.03) # shapes become more narrow/close to points vs. spread out
+
+plot(voles_density) # this calculates the density of features in a neighborhood around those features
+# Possible uses include analyzing density of housing or occurrences of crime for community planning purposes or exploring how roads or utility lines influence wildlife habitat
+#  smoothly curved surface is fitted over each point. The surface value is highest at the location of the point and diminishes with increasing distance from the point, reaching zero at the Search radius distance from the point.
+# The density at each output raster cell is calculated by adding the values of all the kernel surfaces where they overlay the raster cell center
+```
+
+Compare hotspots to complete spatial randomness
+
+```{r}
+# you can start viewing this in tmap by rasterizing it 
+wgs84 = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"
+vole_raster <- raster(voles_density, crs = wgs84)
+
+# then plot:
+tmap_mode("view")
+
+tm_shape(vole_raster) +
+  tm_raster(midpoint = NA,
+            palette = "Reds",
+            legend.show = FALSE)
+```
+
+## Nearest neighbor (G-function)
+
+- `r`: a sequence of distances (in the spatial units of the data) over which we’ll calculate the proportion of points with nearest neighbor within that range
+
+- `gfunction`: This uses the envelope() function within which we run simulations for CSR, and calculate the G-function value at distances r for each simulation. So this will calculate the G-function for our actual data, and also for simulations of CSR if we had the same number of observations in the window but they were independent. The nsim = 100 here means there will be 100 simulations of CSR. The nrank = 2 means that the second highest and second lowest values from simulations are shown as the “hi” and “lo” value envelopes, with the “theo” being the “theoretical value of the summary function under CSR (Complete Spatial Randomness, a uniform Poisson point process) if the simulations were generated according to CSR.” So we’re really comparing our “observed” data to the “theoretical CSR” here, and those “hi” and “lo” envelope bounds give us an idea of spread for the simulations.
+
+```{r}
+# make a sequence of distnaces over which to calculate G(r)
+r <- seq(0, 0.15, by = 0.005)
+
+gfunction <- envelope(voles_full, fun = Gest, r = r, nsim = 100, nrank = 2) # calculate the actual and theoretical G(r) values, using 100 simulations of CRS for the theoretcial outcome
+```
+```{r}
+gfunction
+
+# gather this to plot series in ggplot
+gfunction_long <- gfunction %>% 
+  as.data.frame() %>% 
+  pivot_longer(cols = obs:hi, names_to = "model", values_to = "g_val")
+
+# then graph it in ggplot:
+ggplot(data = gfunction_long, aes(x = r, y = g_val, group = model)) +
+  geom_line(aes(color = model))
+```
+
+Confirms clustering! Our model (observed) has a greater proportion of events with nearest neigbors and smaller distances compared to a theoretical Complete Spatial Randomness (CSR) scenario (model = theo)
+
+## L-function (standardized K-function)
+
+Considers densities of observations within some distance R (expanding circles around each point) for comparison. This is using very similar code, but now the function is Lest for “L estimate”, which calculates the density of events within growing circles around each point. That is much more intensive than just the single nearest neighbor, so I run nsim = 10 here instead (you can do 100 or more again, you’ll just notice that creating the simulations takes longer
+
+```{r}
+r2 <- seq(0, 0.5, by = 0.05)
+
+lfunction <- envelope(voles_full, fun = Lest, r = r2, nsim = 10, rank = 2, global = TRUE)
+```
+
+```{r}
+# Gather this to plot series in ggplot:
+lfunction_long <- lfunction %>% 
+  as.data.frame() %>% 
+  pivot_longer(cols = obs:hi, names_to = "model", values_to = "k_val")
+
+# plot
+ggplot(data = lfunction_long, aes(x = r, y = k_val, group = model)) +
+  geom_line(aes(color = model))
+```
+
+We again see that at lower distances, our data overall has a higher density of nearest neighbors compared to a simulated CSR scenario. Again, evidence of clustering.

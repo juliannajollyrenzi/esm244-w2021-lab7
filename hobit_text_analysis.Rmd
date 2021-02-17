@@ -1,0 +1,166 @@
+---
+title: "Hobbit text analysis"
+author: "Julianna Renzi"
+date: "2/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(tidyverse)
+require(tidytext)
+require(textdata)
+require(pdftools)
+require(ggwordcloud)
+
+```
+
+
+Read in the Hobbit
+
+```{r, cache=TRUE}
+# cache outcome because hobbit takes a long time to load (won't re-load unless there's a change to the chunk)
+hobbit_text <- pdf_text("the-hobbit.pdf") # from pdftools
+
+```
+
+```{r}
+# each page is a line--this is the entire 34th page of the hobbit
+hobbit_text_p34 <- hobbit_text[34] 
+```
+
+Want to split it up by line and trim excess white space
+
+```{r}
+hobbit_tidy <- data.frame(hobbit_text) %>% # now each row is a different page 
+  mutate(text_full = str_split(hobbit_text, pattern = "\\n")) %>% # first slash just says look for \n as a string
+# break it up using string split breaking wherever there is a line break
+# now each line is an element -- then want each element
+  unnest(text_full) %>% # now see repeated information but each line has it's own line
+  mutate(text_full = str_trim(text_full)) # get rid of excess white spaces
+
+```
+
+```{r}
+hobbit_df <- hobbit_tidy %>% # notice there are lots of lines at the top before chapter 1--first get rid of front matter
+  slice(-(1:125)) %>% 
+  mutate(chapter = case_when(
+    str_detect(text_full, pattern = "Chapter") ~ text_full,
+    TRUE ~ NA_character_ # need to specify what type of NA (must be a character in this form)
+  )) %>% # use str_detect to detect chapter--if find chapter repeat that in a new column--then use fill to fill in between NA's
+  fill(chapter) %>% # fills in the NAs with the value above
+  # need to know this is in order to use fill()
+# also see roman numerals--won't be good in ggplot()
+  separate(col = chapter, into = c("ch", "no"), sep = " ") %>% # THIS IS AWESOME!! 
+  mutate(chapter = as.numeric(as.roman(no)))
+
+```
+
+Get it into tokenized text format (1 token = 1 single word)
+
+```{r}
+hobbit_tokens <- hobbit_df %>% 
+  unnest_tokens(word, text_full) %>% # from tidytext
+  select(-hobbit_text) # get rid of repeated info
+
+hobbit_wordcount <- hobbit_tokens %>% 
+  count(chapter, word)  # is equivalent to df %>% group_by(a, b) %>% summarise(n = n())
+  # remove stop words
+
+
+```
+
+Remove stop words
+
+```{r}
+hobbit_nonstop_words <- hobbit_tokens %>% 
+  anti_join(stop_words) # knows to un-join by matching column name
+  # see now that 65,000 words were stop words!!
+# use ?stop_words to look at different stop_words lexicons
+
+
+# count them
+nonstop_counts <- hobbit_nonstop_words %>% 
+  count(chapter, word)
+
+# find the top 5 by chapter
+top_5_words <- nonstop_counts %>% 
+  group_by(chapter) %>% 
+  arrange(-n) %>% 
+  slice(1:5) # keep top five
+
+top_5_words
+```
+
+Visualize
+
+```{r}
+ggplot(data = top_5_words, aes(x = word, y = n)) +
+  geom_col(fill = "blue") +
+  facet_wrap(~chapter, scales = "free") + # need scales = "free" to make it so axes (incl. x axis) is not the same in each plot
+  coord_flip()
+```
+
+Make a word cloud
+
+```{r}
+ch1_top100 <- nonstop_counts %>% 
+  filter(chapter == 1) %>% 
+  arrange(-n) %>% 
+  slice(1:100)
+
+ch1_cloud <- ggplot(data = ch1_top100, aes(label = word)) +
+  geom_text_wordcloud(aes(color = n, size = n)) +
+  scale_size_area(max_size = 6)
+
+ch1_cloud
+```
+
+## Sentiment analysis using built in lexicons
+
+```{r}
+# afinn ranks words on a scale of -5 to 5
+afinn_pos <- get_sentiments("afinn") %>% # could also do nrc, etc.
+  filter(value > 2)
+
+```
+
+### With `afinn`
+
+Unlike anti_join now want to only keep words in the Hobbit that have a coutnerpart in the lexicon
+
+```{r}
+hobbit_afinn <- hobbit_nonstop_words %>% 
+  inner_join(get_sentiments("afinn"))
+
+afinn_counts <- hobbit_afinn %>% 
+  count(chapter, value) # sense of negativity or positivity
+
+# or get a mean value
+afinn_means <- hobbit_afinn %>% 
+  group_by(chapter) %>% 
+  summarize(mean_afinn = mean(value))
+
+ggplot(data = afinn_means, aes(x = chapter, y = mean_afinn)) +
+  geom_col() +
+  coord_flip() +
+  theme_light()
+```
+
+### Use NRC lexicon
+
+```{r}
+hobbit_nrc <- hobbit_nonstop_words %>% 
+  inner_join(get_sentiments("nrc")) # have repeated values when there are multiple sentiments for a word
+
+hobbit_nrc_counts <- hobbit_nrc %>% 
+  count(chapter, sentiment) # 10 sentiments total in nrc
+
+hobbit_nrc_counts %>% 
+  ggplot(aes(x = sentiment, y = n)) +
+  geom_col() +
+  facet_wrap(~chapter) +
+  coord_flip() # remember these are only words that have a value in the nrc lexicon
+# see high emotion chapters have stronger words (e.g. when they battle the spiders, etc.)
+```
+
